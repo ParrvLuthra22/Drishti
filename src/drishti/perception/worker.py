@@ -131,11 +131,7 @@ class PerceptionWorker:
                 cv2.LINE_AA,
             )
 
-        lines = [
-            f"FPS: {result.fps:.1f}",
-            f"Camera: {result.camera_id}",
-            f"Tracks: {len(result.tracks)}",
-        ]
+        lines = self._overlay_lines(result)
         line_height = 22
         y = frame.shape[0] - 10 - line_height * (len(lines) - 1)
         for line in lines:
@@ -143,6 +139,14 @@ class PerceptionWorker:
                 frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA
             )
             y += line_height
+
+    def _overlay_lines(self, result: PerceptionResult) -> list[str]:
+        """Text lines drawn in the bottom-left corner. Subclasses override to add metrics."""
+        return [
+            f"FPS: {result.fps:.1f}",
+            f"Camera: {result.camera_id}",
+            f"Tracks: {len(result.tracks)}",
+        ]
 
     def _handle_stop(self, signum: int, _frame: object) -> None:
         self._running = False

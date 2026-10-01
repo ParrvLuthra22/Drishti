@@ -7,12 +7,17 @@ from drishti.perception.worker import PerceptionResult
 FRAME_SHAPE = (480, 640, 3)
 
 
-def make_result(positions: list[tuple[float, float]], frame_id: int = 0) -> PerceptionResult:
-    """Fake result with one 20x20 person track centred on each position; ids follow list order."""
+def make_result(
+    positions: list[tuple[float, float]], frame_id: int = 0, half: float = 10.0
+) -> PerceptionResult:
+    """Fake result with one person track centred on each position; ids follow list order.
+
+    Boxes are 2*half square, so the default is 20x20.
+    """
     tracks = [
         Track(
             track_id=i,
-            bbox=(x - 10, y - 10, x + 10, y + 10),
+            bbox=(x - half, y - half, x + half, y + half),
             confidence=0.9,
             class_id=0,
             class_name="person",
@@ -87,7 +92,7 @@ def test_directional_flow() -> None:
         metrics = analyser.update(make_result(positions, frame_id))
     assert metrics.flow_direction == "directional"
     assert metrics.flow_score < 0.3
-    assert metrics.avg_speed > 2.0
+    assert metrics.avg_speed > 0.05  # 6 px/frame on a 20 px box is 0.3 box heights per frame
 
 
 def test_chaotic_flow() -> None:
@@ -114,3 +119,36 @@ def test_heatmap_overlay_shape_and_reset() -> None:
 
     heatmap.reset()
     assert not heatmap._map.any()
+
+
+def run_drift(half: float, step: float, tracks: int = 3, frames: int = 4):
+    """Move `tracks` same-direction tracks `step` pixels per frame; boxes are 2*half tall."""
+    analyser = CrowdAnalyser()
+    base = [(300.0 + 200 * i, 400.0) for i in range(tracks)]
+    for frame_id in range(frames):
+        positions = [(x + step * frame_id, y) for x, y in base]
+        metrics = analyser.update(make_result(positions, frame_id, half))
+    return metrics
+
+
+def test_small_drift_on_close_up_box_is_calm() -> None:
+    # 10 px/frame on a 600 px tall box is ~0.017 box heights per frame: head-movement jitter.
+    metrics = run_drift(half=300.0, step=10.0)
+    assert metrics.flow_direction == "calm"
+    assert metrics.avg_speed < 0.05
+
+
+def test_same_drift_on_small_box_is_directional() -> None:
+    # 10 px/frame on a 20 px tall box is 0.5 box heights per frame: real movement.
+    metrics = run_drift(half=10.0, step=10.0)
+    assert metrics.flow_direction == "directional"
+    assert metrics.avg_speed > 0.05
+
+
+def test_single_moving_track_is_calm_with_zero_flow_score() -> None:
+    analyser = CrowdAnalyser()
+    for frame_id in range(4):
+        metrics = analyser.update(make_result([(100.0 + 20 * frame_id, 100.0)], frame_id))
+    assert metrics.avg_speed > 0.05  # it really is moving fast...
+    assert metrics.flow_direction == "calm"  # ...but one track is not a crowd flow
+    assert metrics.flow_score == 0.0

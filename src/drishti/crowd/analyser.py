@@ -8,7 +8,9 @@ from drishti.perception.worker import PerceptionResult
 
 MAX_TRACKS_FOR_FULL_DENSITY = 20  # frame-level density saturates at this many tracks
 ZONE_CRITICAL_PEOPLE_PER_SQM = 4.0  # zone density saturates at this many people per m²
-CALM_SPEED_PX_PER_FRAME = 2.0
+CALM_SPEED_BOX_HEIGHTS_PER_FRAME = 0.05  # a track is "moving" above this, as a fraction of its box height
+SPEED_SMOOTHING_READINGS = 3  # velocity is averaged over this many position readings
+MIN_MOVING_TRACKS_FOR_FLOW = 2  # fewer moving tracks than this is always "calm"
 DIRECTIONAL_FLOW_SCORE = 0.3
 POSITION_HISTORY = 15
 BOTTLENECK_MIN_COUNT = 5  # a bottleneck needs strictly more tracks than this
@@ -36,7 +38,7 @@ class CrowdMetrics:
     density_score: float  # 0.0 to 1.0
 
     # Flow
-    avg_speed: float  # pixels per frame, avg across tracks
+    avg_speed: float  # box heights per frame (relative to each track's bbox height), avg across tracks
     flow_direction: str  # "calm" | "directional" | "chaotic"
     flow_score: float  # 0.0 to 1.0 (higher = more chaotic)
 
@@ -64,7 +66,7 @@ class CrowdAnalyser:
         self.zones = zones or []
         self.density_thresholds = density_thresholds
         self._history: deque[PerceptionResult] = deque(maxlen=history_len)
-        self._track_positions: dict[int, deque[tuple[float, float]]] = {}
+        self._track_positions: dict[int, deque[tuple[float, float, float]]] = {}  # (cx, cy, bbox height)
         self._last_seen: dict[int, int] = {}  # track_id -> update counter
         self._updates = 0
         self._stale_after = history_len
@@ -100,7 +102,8 @@ class CrowdAnalyser:
             positions = self._track_positions.setdefault(
                 track.track_id, deque(maxlen=POSITION_HISTORY)
             )
-            positions.append(_bbox_center(track.bbox))
+            cx, cy = _bbox_center(track.bbox)
+            positions.append((cx, cy, track.bbox[3] - track.bbox[1]))
             self._last_seen[track.track_id] = self._updates
 
         # Drop tracks that have not been seen for a while so the dict cannot grow forever.
@@ -123,22 +126,34 @@ class CrowdAnalyser:
         return "critical"
 
     def _compute_flow(self, result: PerceptionResult) -> tuple[float, str, float]:
-        velocities: list[tuple[float, float]] = []
+        velocities: list[tuple[float, float]] = []  # (dx, dy) in pixels per frame, smoothed
+        relative_speeds: list[float] = []  # speed as a fraction of the track's box height
         for track in result.tracks:
             positions = self._track_positions.get(track.track_id)
-            if positions is not None and len(positions) >= 2:
-                (x0, y0), (x1, y1) = positions[-2], positions[-1]
-                velocities.append((x1 - x0, y1 - y0))
+            if positions is None or len(positions) < 2:
+                continue
+            readings = min(SPEED_SMOOTHING_READINGS, len(positions))
+            x0, y0, _ = positions[-readings]
+            x1, y1, height = positions[-1]
+            steps = readings - 1
+            dx, dy = (x1 - x0) / steps, (y1 - y0) / steps
+            velocities.append((dx, dy))
+            relative_speeds.append(float(np.hypot(dx, dy)) / max(height, 1.0))
 
         if not velocities:
             return 0.0, "calm", 0.0
 
         vel = np.asarray(velocities, dtype=np.float64)
-        speeds = np.hypot(vel[:, 0], vel[:, 1])
+        speeds = np.asarray(relative_speeds, dtype=np.float64)
         avg_speed = float(speeds.mean())
 
-        flow_score = self._flow_score(vel, speeds)
-        if avg_speed < CALM_SPEED_PX_PER_FRAME:
+        moving = speeds >= CALM_SPEED_BOX_HEIGHTS_PER_FRAME
+        if moving.sum() < MIN_MOVING_TRACKS_FOR_FLOW:
+            # A single moving track has no crowd direction, and jitter is not movement.
+            return avg_speed, "calm", 0.0
+
+        flow_score = self._flow_score(vel[moving])
+        if avg_speed < CALM_SPEED_BOX_HEIGHTS_PER_FRAME:
             direction = "calm"
         elif flow_score < DIRECTIONAL_FLOW_SCORE:
             direction = "directional"
@@ -147,21 +162,18 @@ class CrowdAnalyser:
         return avg_speed, direction, flow_score
 
     @staticmethod
-    def _flow_score(vel: np.ndarray, speeds: np.ndarray) -> float:
+    def _flow_score(moving_vel: np.ndarray) -> float:
         """Circular std of movement angles over pi: 0 = everyone aligned, 1 = no common direction.
 
         A plain std of angles would treat headings of +179° and -179° as opposite; the
         circular form handles the wrap-around.
         """
-        moving = speeds > 1e-6  # angle is undefined for a track that did not move
-        if moving.sum() < 2:
-            return 0.0
-        angles = np.arctan2(vel[moving, 1], vel[moving, 0])
+        angles = np.arctan2(moving_vel[:, 1], moving_vel[:, 0])
         resultant = np.hypot(np.cos(angles).mean(), np.sin(angles).mean())  # 1 = aligned
         if resultant < 1e-9:
             return 1.0
         circular_std = np.sqrt(-2.0 * np.log(min(resultant, 1.0)))
-        return float(np.clip(circular_std / np.pi, 0.0, 1.0))
+        return max(0.0, float(np.clip(circular_std / np.pi, 0.0, 1.0)))  # max() turns -0.0 into 0.0
 
     def _zone_counts(self, result: PerceptionResult) -> tuple[dict[str, int], dict[str, str]]:
         counts: dict[str, int] = {}
@@ -202,6 +214,11 @@ class HeatmapAccumulator:
     ) -> None:
         self._map = np.zeros((frame_height, frame_width), dtype=np.float32)
         self.decay = decay
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """(width, height) of the map in pixels."""
+        return self._map.shape[1], self._map.shape[0]
 
     def update(self, result: PerceptionResult) -> None:
         self._map *= self.decay  # fade old heat
