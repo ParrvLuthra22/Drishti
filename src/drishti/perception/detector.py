@@ -35,6 +35,7 @@ class Detector:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         self.device = device
+        self.model_path = str(path)
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.person_only = person_only

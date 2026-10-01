@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from drishti.perception.detector import Detector
+from drishti.perception.publisher import DetectionEvent, RedisEventPublisher
 from drishti.perception.tracker import Track, Tracker
 
 logger = logging.getLogger(__name__)
@@ -34,12 +35,14 @@ class PerceptionWorker:
         detector: Detector,
         tracker: Tracker,
         visualize: bool = False,
+        publisher: RedisEventPublisher | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.source = source
         self.detector = detector
         self.tracker = tracker
         self.visualize = visualize
+        self.publisher = publisher
         self._running = False
         self.frame_id = 0
         self._fps_window: deque[float] = deque(maxlen=FPS_WINDOW)
@@ -93,6 +96,17 @@ class PerceptionWorker:
         return (len(self._fps_window) - 1) / elapsed if elapsed > 0 else 0.0
 
     def _on_result(self, result: PerceptionResult) -> None:
+        if self.publisher is not None:
+            self.publisher.publish(
+                DetectionEvent.from_tracks(
+                    camera_id=result.camera_id,
+                    frame_id=result.frame_id,
+                    timestamp=result.timestamp,
+                    tracks=result.tracks,
+                    fps=result.fps,
+                )
+            )
+
         if result.frame_id % LOG_EVERY_N_FRAMES == 0:
             logger.info(
                 "cam=%s frame=%d tracks=%d fps=%.1f",
