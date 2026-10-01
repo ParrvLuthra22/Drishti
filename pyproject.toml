@@ -13,9 +13,11 @@ dependencies = [
     "python-dotenv>=1.2.4",
     "redis>=8.1.0",
     "rich>=15.0.0",
+    "scikit-learn>=1.9.1",
     "supervision>=0.30,<0.31",
     "torch>=2.14.1",
     "torchvision>=0.29.1",
+    "transformers>=5.18.0",
     "ultralytics>=8.4.170",
     "uvicorn>=0.54.0",
 ]
