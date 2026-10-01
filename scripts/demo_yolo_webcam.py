@@ -32,7 +32,7 @@ def draw_overlay(frame, fps: float, people: int) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="YOLOv8n live detection demo")
-    parser.add_argument("--source", default="0", help="webcam index, file path, or RTSP URL")
+    parser.add_argument("--source", default="1", help="webcam index (default 1: laptop webcam), file path, or RTSP URL")
     parser.add_argument("--conf", type=float, default=0.5, help="confidence threshold")
     args = parser.parse_args()
 
