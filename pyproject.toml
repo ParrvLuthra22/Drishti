@@ -1,0 +1,30 @@
+[project]
+name = "drishti"
+version = "0.1.0"
+description = "Drishti: crowd perception, anomaly detection and intelligence pipeline"
+authors = [
+    { name = "ParrvLuthra22", email = "parrvluthra@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.142.2",
+    "numpy>=2.5.3",
+    "opencv-python>=5.0.0.93",
+    "python-dotenv>=1.2.4",
+    "redis>=8.1.0",
+    "rich>=15.0.0",
+    "torch>=2.14.1",
+    "torchvision>=0.29.1",
+    "ultralytics>=8.4.170",
+    "uvicorn>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
