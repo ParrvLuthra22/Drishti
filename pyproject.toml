@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv>=1.2.4",
     "redis>=8.1.0",
     "rich>=15.0.0",
+    "supervision>=0.30,<0.31",
     "torch>=2.14.1",
     "torchvision>=0.29.1",
     "ultralytics>=8.4.170",
