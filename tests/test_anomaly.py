@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 import torch
@@ -17,16 +19,30 @@ class WhiteFrames(NormalSceneDataset):
 
     def __init__(self, count: int = 50) -> None:
         self.frames = [torch.ones(1, 64, 64) for _ in range(count)]
+        self.video_source = None
+
+
+class FreshWhiteFrames(NormalSceneDataset):
+    """White frames with slight brightness noise: like fresh camera frames, never pixel-identical."""
+
+    def __init__(self, count: int = 100) -> None:
+        generator = torch.Generator().manual_seed(1)
+        self.frames = [0.8 + 0.2 * torch.rand(1, 64, 64, generator=generator) for _ in range(count)]
+        self.video_source = None
+
+
+def train_on_white(output_dir: str) -> AnomalyTrainer:
+    torch.manual_seed(0)
+    trainer = AnomalyTrainer(device="cpu", epochs=100, batch_size=16, output_dir=output_dir)
+    # Stand in for re-opening the camera: hand the trainer unseen frames instead.
+    trainer._collect_calibration_set = lambda source, start_frame=0: FreshWhiteFrames()
+    trainer.train(WhiteFrames(), calibration_source="unused")
+    return trainer
 
 
 @pytest.fixture(scope="module")
 def trained_on_white(tmp_path_factory) -> AnomalyTrainer:
-    torch.manual_seed(0)
-    trainer = AnomalyTrainer(
-        device="cpu", epochs=30, batch_size=16, output_dir=str(tmp_path_factory.mktemp("anomaly"))
-    )
-    trainer.train(WhiteFrames())
-    return trainer
+    return train_on_white(str(tmp_path_factory.mktemp("anomaly")))
 
 
 def white_frame() -> np.ndarray:
@@ -84,3 +100,22 @@ def test_trainer_saves_and_reloads(trained_on_white: AnomalyTrainer) -> None:
     reloaded.load(str(trained_on_white.output_dir))
     assert reloaded.threshold == pytest.approx(trained_on_white.threshold)
     assert not reloaded.model.training
+
+
+def test_threshold_comes_from_held_out_frames(trained_on_white: AnomalyTrainer) -> None:
+    # Threshold the old way: mean + 2 std of the error on the frames the model trained on.
+    train_errors = trained_on_white._reconstruction_errors(WhiteFrames())
+    training_threshold = float(train_errors.mean() + 2 * train_errors.std())
+
+    assert trained_on_white.threshold > training_threshold
+
+    saved = json.loads((trained_on_white.output_dir / "threshold.json").read_text())
+    assert saved["threshold"] == pytest.approx(trained_on_white.threshold)
+    assert saved["calibration_frames"] == len(FreshWhiteFrames())
+    assert saved["threshold_std_factor"] == 3.0
+
+
+def test_calibration_needs_a_source() -> None:
+    trainer = AnomalyTrainer(device="cpu", epochs=1, batch_size=16, output_dir="unused")
+    with pytest.raises(ValueError, match="calibration source"):
+        trainer.train(WhiteFrames())  # in-memory dataset and no calibration_source given

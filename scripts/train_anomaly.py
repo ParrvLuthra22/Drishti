@@ -23,10 +23,12 @@ def main() -> None:
         f"Collecting {args.frames} frames from source {args.source!r}. "
         "Keep the scene looking [bold]normal[/bold] until this finishes."
     )
-    dataset = NormalSceneDataset(parse_source(args.source), num_frames=args.frames)
+    source = parse_source(args.source)
+    dataset = NormalSceneDataset(source, num_frames=args.frames)
 
+    # After training, the trainer re-opens the same source for held-out frames to set the threshold.
     trainer = AnomalyTrainer(epochs=args.epochs)
-    trainer.train(dataset)
+    trainer.train(dataset, calibration_source=source)
     console.print(f"\n[bold green]Final threshold: {trainer.threshold:.6f}[/bold green]")
 
 

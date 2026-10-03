@@ -18,6 +18,9 @@ FRAME_SIZE = 64  # the architecture is fixed to 64x64 inputs
 LATENT_DIM = 256
 WARMUP_FRAMES = 15  # discarded at capture start while the camera's auto-exposure settles
 SUSPICIOUS_FACTOR = 1.5
+CALIBRATION_FRAMES = 200  # held-out frames used to set the threshold
+CALIBRATION_SKIP = 5
+THRESHOLD_STD_FACTOR = 3.0  # threshold = mean + 3 * std of held-out reconstruction error
 
 
 def _resolve_device(requested: str) -> torch.device:
@@ -110,12 +113,17 @@ class NormalSceneDataset(Dataset):
         num_frames: int = 2000,
         frame_size: int = FRAME_SIZE,
         skip: int = 3,  # keep every Nth frame
+        start_frame: int = 0,  # for video files: first frame to read (ignored by live cameras)
     ) -> None:
         self.frames: list[torch.Tensor] = []
+        self.video_source = video_source
+        self.frames_read = start_frame  # position reached in the source, for video files
 
         cap = cv2.VideoCapture(video_source)
         if not cap.isOpened():
             raise RuntimeError(f"could not open video source {video_source!r}")
+        if start_frame:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         try:
             read = 0
             while len(self.frames) < num_frames:
@@ -123,6 +131,7 @@ class NormalSceneDataset(Dataset):
                 if not ok:  # end of file or camera lost
                     break
                 read += 1
+                self.frames_read = start_frame + read
                 if read <= WARMUP_FRAMES or (read - WARMUP_FRAMES) % skip != 0:
                     continue
                 self.frames.append(torch.from_numpy(preprocess_frame(frame, frame_size)).unsqueeze(0))
@@ -163,7 +172,18 @@ class AnomalyTrainer:
         self.optimizer = Adam(self.model.parameters(), lr=lr)
         self.threshold: float | None = None
 
-    def train(self, dataset: NormalSceneDataset) -> None:
+    def train(
+        self,
+        dataset: NormalSceneDataset,
+        calibration_source: int | str | None = None,
+    ) -> None:
+        """Train on `dataset`, then set the anomaly threshold from freshly captured frames.
+
+        Reconstruction error on the training frames is far lower than on new frames of the same
+        scene (the model memorises them), so a threshold derived from them flags everything. The
+        threshold is therefore calibrated on CALIBRATION_FRAMES unseen frames from
+        `calibration_source` (default: the dataset's own source).
+        """
         if len(dataset) == 0:
             raise ValueError("dataset is empty, nothing to train on")
 
@@ -182,9 +202,16 @@ class AnomalyTrainer:
             if epoch % 5 == 0:
                 console.print(f"Epoch {epoch}/{self.epochs}  loss {total / seen:.6f}")
 
-        errors = self._reconstruction_errors(dataset)
+        source = calibration_source if calibration_source is not None else getattr(dataset, "video_source", None)
+        # A video file replays from the start, so skip past the frames the model already trained on.
+        start_frame = getattr(dataset, "frames_read", 0) if isinstance(source, str) and Path(source).is_file() else 0
+        console.print(f"Calibrating threshold on {CALIBRATION_FRAMES} unseen frames (skip={CALIBRATION_SKIP})...")
+        calibration = self._collect_calibration_set(source, start_frame)
+
+        train_errors = self._reconstruction_errors(dataset)
+        errors = self._reconstruction_errors(calibration)
         mean, std = float(errors.mean()), float(errors.std())
-        self.threshold = mean + 2 * std
+        self.threshold = mean + THRESHOLD_STD_FACTOR * std
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), self.output_dir / "autoencoder.pt")
@@ -192,17 +219,32 @@ class AnomalyTrainer:
             json.dumps(
                 {
                     "threshold": self.threshold,
-                    "mean_recon_error": mean,
+                    "threshold_std_factor": THRESHOLD_STD_FACTOR,
+                    "mean_recon_error": mean,  # on the held-out calibration frames
                     "std_recon_error": std,
-                    "num_frames": len(dataset),
+                    "calibration_frames": len(calibration),
+                    "train_mean_recon_error": float(train_errors.mean()),
+                    "train_std_recon_error": float(train_errors.std()),
+                    "num_train_frames": len(dataset),
                 },
                 indent=2,
             )
         )
         console.print(
-            f"Saved model + threshold to {self.output_dir} "
-            f"(error mean {mean:.6f}, std {std:.6f})"
+            f"Saved model + threshold to {self.output_dir}\n"
+            f"  train error      mean {train_errors.mean():.6f}  std {train_errors.std():.6f}\n"
+            f"  held-out error   mean {mean:.6f}  std {std:.6f}"
         )
+
+    def _collect_calibration_set(self, source: int | str | None, start_frame: int = 0) -> NormalSceneDataset:
+        if source is None:
+            raise ValueError("a calibration source is needed: pass calibration_source to train()")
+        calibration = NormalSceneDataset(
+            source, num_frames=CALIBRATION_FRAMES, skip=CALIBRATION_SKIP, start_frame=start_frame
+        )
+        if len(calibration) == 0:
+            raise RuntimeError(f"could not collect any calibration frames from {source!r}")
+        return calibration
 
     @torch.no_grad()
     def _reconstruction_errors(self, dataset: NormalSceneDataset) -> np.ndarray:
