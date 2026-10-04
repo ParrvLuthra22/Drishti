@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
+from drishti.actions.fight_detector import FightDetector
 from drishti.anomaly.autoencoder import AnomalyScorer, AnomalyTrainer
 from drishti.crowd.analyser import CrowdAnalyser, CrowdMetrics, HeatmapAccumulator
 from drishti.intelligence.risk_agent import DrishtiState, RiskAgent
@@ -22,6 +23,9 @@ ANOMALY_MODEL_DIR = ROOT / "models" / "anomaly"
 HEATMAP_SIZE = (1280, 720)  # (width, height); resized below if the camera delivers another size
 PUSH_INTERVAL_S = 1.0  # risk assessment and dashboard update cadence
 DASHBOARD_TIMEOUT_S = 0.1
+# VideoMAE was trained on 16 frames spread over ~5 s clips, so live input samples a frame every 0.3 s
+# (16 consecutive frames at 15 FPS cover only ~1 s, and the model then calls everything a non-fight).
+FIGHT_SAMPLE_INTERVAL_S = 0.3
 
 
 class CrowdWorker(PerceptionWorker):
@@ -40,6 +44,7 @@ class CrowdWorker(PerceptionWorker):
         anomaly_scorer: AnomalyScorer | None = None,
         risk_agent: RiskAgent | None = None,
         dashboard_url: str = "",
+        fight_detector: FightDetector | None = None,
     ) -> None:
         super().__init__(camera_id, source, detector, tracker, visualize=visualize)
         self.analyser = analyser
@@ -47,11 +52,13 @@ class CrowdWorker(PerceptionWorker):
         self.show_heatmap = show_heatmap
         self.anomaly_scorer = anomaly_scorer
         self.risk_agent = risk_agent
+        self.fight_detector = fight_detector
         self.dashboard_url = dashboard_url.rstrip("/")
 
         self.metrics: CrowdMetrics | None = None
         self.anomaly: dict | None = None
         self.risk_state: DrishtiState | None = None
+        self.fight: dict | None = None
 
         # Risk assessment can call an LLM and the dashboard POST is network I/O, so both run on a
         # background thread; the vision loop never waits on them.
@@ -67,6 +74,8 @@ class CrowdWorker(PerceptionWorker):
         self.heatmap.update(result)
         if self.anomaly_scorer is not None and self.last_frame is not None:
             self.anomaly = self.anomaly_scorer.score_frame(self.last_frame)
+        if self.fight_detector is not None and self.last_frame is not None:
+            self.fight_detector.add_frame(self.last_frame)  # cheap; thins itself to one frame per 0.3 s
 
         if result.frame_id % 30 == 0:
             m = self.metrics
@@ -96,13 +105,19 @@ class CrowdWorker(PerceptionWorker):
         self, result: PerceptionResult, metrics: CrowdMetrics, anomaly: dict | None
     ) -> None:
         try:
-            # fight_probability stays 0.0: VideoMAE is not wired into the live loop yet.
+            # Inference runs here, off the vision loop, once per push; 0.0 until the buffer has 16 frames.
+            fight_probability = 0.0
+            if self.fight_detector is not None:
+                self.fight = self.fight_detector.predict()
+                if self.fight["ready"]:
+                    fight_probability = self.fight["fight_probability"]
+                logger.info("fight probability %.2f (ready=%s)", fight_probability, self.fight["ready"])
             state = self.risk_agent.assess(
                 result.camera_id,
                 result.frame_id,
                 result.timestamp,
                 metrics,
-                fight_probability=0.0,
+                fight_probability=fight_probability,
                 anomaly_result=anomaly,
             )
             self.risk_state = state
@@ -136,6 +151,10 @@ class CrowdWorker(PerceptionWorker):
             f"Flow: {m.flow_direction} ({m.flow_score:.2f})",
             f"Bottleneck: {'YES' if m.bottleneck_detected else 'NO'}",
         ]
+        if self.fight is not None:
+            lines.append(
+                f"Fight: {self.fight['fight_probability']:.0%}" if self.fight["ready"] else "Fight: warming up"
+            )
         if self.risk_state is not None:
             lines.append(f"Risk: {self.risk_state['risk_score']:.1f} ({self.risk_state['risk_level']})")
         return lines
@@ -165,6 +184,11 @@ def main() -> None:
     parser.add_argument("--conf", type=float, default=0.5, help="confidence threshold")
     parser.add_argument("--heatmap", action="store_true", help="blend the crowd heatmap onto the video")
     parser.add_argument(
+        "--fight",
+        action="store_true",
+        help="run the VideoMAE fight detector (extra startup time and memory)",
+    )
+    parser.add_argument(
         "--visualize",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -191,6 +215,7 @@ def main() -> None:
         anomaly_scorer=load_anomaly_scorer(),
         risk_agent=RiskAgent(),
         dashboard_url=args.dashboard_url,
+        fight_detector=FightDetector(sample_interval_s=FIGHT_SAMPLE_INTERVAL_S) if args.fight else None,
     )
     try:
         worker.run()
