@@ -15,6 +15,7 @@ dependencies = [
     "opencv-python>=5.0.0.93",
     "python-dotenv>=1.2.4",
     "redis>=8.1.0",
+    "requests>=2.34.2",
     "rich>=15.0.0",
     "scikit-learn>=1.9.1",
     "supervision>=0.30,<0.31",

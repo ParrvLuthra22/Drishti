@@ -45,6 +45,7 @@ class PerceptionWorker:
         self.publisher = publisher
         self._running = False
         self.frame_id = 0
+        self.last_frame: np.ndarray | None = None  # the frame behind the result in _on_result
         self._fps_window: deque[float] = deque(maxlen=FPS_WINDOW)
 
     def run(self) -> None:
@@ -63,6 +64,7 @@ class PerceptionWorker:
                 if not ok:
                     break
 
+                self.last_frame = frame
                 self._fps_window.append(time.perf_counter())
                 detections = self.detector.detect(frame)
                 tracks = self.tracker.update(detections, frame)

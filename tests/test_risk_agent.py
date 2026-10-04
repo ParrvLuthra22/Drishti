@@ -8,6 +8,7 @@ from drishti.intelligence.risk_agent import (
     LLM_MODEL,
     RiskAgent,
     _parse_summary,
+    clear_summary_cache,
 )
 
 CHATANTHROPIC = "drishti.intelligence.risk_agent.ChatAnthropic"
@@ -18,6 +19,7 @@ ANOMALY = {"smoothed_score": 0.02, "anomaly_level": "anomaly", "is_anomaly": Tru
 def no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test may reach the real API, even if the developer has a key in their environment."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    clear_summary_cache()
 
 
 def make_metrics(
@@ -158,3 +160,13 @@ def test_no_llm_call_when_no_alert(monkeypatch: pytest.MonkeyPatch) -> None:
 )
 def test_parse_summary_formats(reply: str, summary: str, action: str) -> None:
     assert _parse_summary(reply) == (summary, action)
+
+
+def test_repeated_alert_reuses_the_cached_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    with patch(CHATANTHROPIC) as chat:
+        chat.return_value.invoke.return_value = SimpleNamespace(content="Fight at gate A.\nSend security.")
+        first = assess(high_risk_metrics(), fight_probability=0.85, anomaly_result=ANOMALY)
+        second = assess(high_risk_metrics(), fight_probability=0.87, anomaly_result=ANOMALY)  # same situation
+    assert chat.return_value.invoke.call_count == 1
+    assert second["incident_summary"] == first["incident_summary"] == "Fight at gate A."

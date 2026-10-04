@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from typing import TypedDict
 
 from dotenv import load_dotenv
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 LLM_MODEL = "claude-haiku-4-5"
 FIGHT_ALERT_PROBABILITY = 0.5  # above this a fight alerts on its own (and adds a signal)
 ALERT_RISK_SCORE = 50.0
+SUMMARY_CACHE_TTL_S = 30.0  # reuse an LLM summary for the same situation this long
 DEFAULT_ACTION = "Monitor situation and alert supervisor if conditions worsen."
 
 SYSTEM_PROMPT = """You are a security operations AI for Project Drishti. Generate concise, \
@@ -149,7 +151,24 @@ def _parse_summary(text: str) -> tuple[str, str]:
     return _clean(summary), _clean(action)
 
 
+_summary_cache: dict[tuple, tuple[float, str, str]] = {}
+
+
+def clear_summary_cache() -> None:
+    _summary_cache.clear()
+
+
+def _cache_key(state: DrishtiState) -> tuple:
+    # Digits are masked so "fight (85% confidence)" and "(87% confidence)" count as the same situation.
+    return (state["camera_id"], state["risk_level"], tuple(re.sub(r"\d+", "#", s) for s in state["signals"]))
+
+
 def generate_summary(state: DrishtiState) -> dict:
+    key = _cache_key(state)
+    cached = _summary_cache.get(key)
+    if cached and time.monotonic() - cached[0] < SUMMARY_CACHE_TTL_S:
+        return {"incident_summary": cached[1], "recommended_action": cached[2]}
+
     human = (
         f"Camera: {state['camera_id']}\n"
         f"Risk Score: {state['risk_score']}/100 ({state['risk_level']})\n"
@@ -168,6 +187,7 @@ def generate_summary(state: DrishtiState) -> dict:
         if not incident_summary:
             raise ValueError("model returned an empty summary")
         recommended_action = recommended_action or DEFAULT_ACTION
+        _summary_cache[key] = (time.monotonic(), incident_summary, recommended_action)
     except Exception as exc:  # noqa: BLE001 - an LLM outage must never stop risk scoring
         logger.warning("LLM summary unavailable (%s); using rule-based fallback", exc)
         incident_summary = (
