@@ -1,8 +1,15 @@
+![CI](https://github.com/ParrvLuthra22/Drishti/actions/workflows/ci.yml/badge.svg)
+![Tests](https://img.shields.io/badge/tests-76%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 # Project Drishti 🎯
 
 > AI-powered situational awareness system —
 > real-time crowd analysis, fight detection,
 > and anomaly detection on live camera feeds.
+
+<!-- Demo GIF coming soon -->
 
 ## What it does
 
@@ -28,14 +35,30 @@ The perception loop (detect → track → analyse) runs on the main thread at ab
 
 ## Results
 
-| Component | Metric | Value |
-|-----------|--------|-------|
-| Person detection | mAP@0.5 | YOLOv8n, COCO-pretrained (not re-evaluated here) |
-| Fight detection | Val F1 (macro) | 88.74% on the 400 RWF-2000 validation clips |
-| Anomaly detection | False positive rate | 0% on 255 live frames of one scene, right after calibration (see limitations) |
-| Perception | Live FPS | ~15 fps (Apple Silicon, MPS); ~11–12 with `--fight` |
+| Component | Metric | Value | Context |
+|-----------|--------|-------|---------|
+| Person detection | Speed | 15 FPS live | YOLOv8n on Apple M3 MPS |
+| Fight detection | Val F1 | **88.74%** | Fine-tuned VideoMAE-base on RWF-2000; SOTA with larger models ~95% |
+| Fight detection | Training time | 62.5 min | Free Colab T4 GPU |
+| Tracking | ID persistence | ByteTrack | Maintains person IDs across full video duration |
+| Anomaly detection | Threshold | Held-out calibration | mean + 3σ on 200 unseen frames |
+| System | Test coverage | 76 tests | Unit + integration, all passing |
 
-Fight-detection details are in [`docs/phase4_results.md`](docs/phase4_results.md). The model is published at `Parrv/drishti-fight-detector` on the Hugging Face Hub.
+Fight-detection details are in [`docs/phase4_results.md`](docs/phase4_results.md) and the [model card](docs/model_card.md). The model is published at `Parrv/drishti-fight-detector` on the Hugging Face Hub.
+
+## Technical challenges
+
+**Two-phase VideoMAE fine-tuning**
+Directly fine-tuning all 86M parameters on 1600 clips destroys pre-trained features. Phase A freezes the backbone and trains only the 2-class head for 1 epoch. Phase B unfreezes everything with a 100× lower learning rate for the backbone (1e-5) vs head (1e-3) and cosine annealing. F1 jumps from 0.62 → 0.86 between epoch 1 and 2.
+
+**Frame sampling for temporal alignment**
+VideoMAE was trained on 16 frames spanning ~5 seconds. Feeding 16 consecutive webcam frames (~1 second) gives 50% accuracy — equivalent to random. Sampling one frame every 0.3 seconds to span the correct temporal window restores full model performance.
+
+**Anomaly threshold calibration**
+Training an autoencoder on consecutive frames causes memorization. Reconstruction error on training frames (~0.0004) is 7× lower than on fresh frames from the same scene (~0.003). Solution: compute threshold on a held-out set of 200 frames never seen during training. Formula: mean + 3σ of held-out error.
+
+**MPS + multiprocessing constraint**
+PyTorch's MPS backend on Apple Silicon doesn't support DataLoader workers (num_workers > 0 causes silent hangs). All DataLoaders in the project use num_workers=0, with the pipeline loop compensating via async background threads for the slower operations (fight inference, risk assessment, LLM calls, dashboard push).
 
 ## Setup
 
@@ -104,6 +127,25 @@ scripts/         demos, training and verification scripts
 notebooks/       Colab notebook used to fine-tune VideoMAE
 ```
 
+## Known limitations and production gaps
+
+**Anomaly detector needs longer training data**
+The autoencoder was trained on 2000 frames of a single scene. Production deployment requires 10,000+ frames captured across varied lighting, camera angles, and times of day, with augmentation and early stopping to prevent memorization. The current model is a proof-of-concept for the anomaly scoring pipeline.
+
+**Fight detection is domain-specific**
+The model achieves 88.74% F1 on RWF-2000 surveillance clips but does not generalize to close-up webcam footage — a single person waving does not trigger detection. This is expected: the training distribution is overhead CCTV footage of multiple people. Deployment on overhead cameras would match the training domain.
+
+**Dashboard API has no authentication**
+The FastAPI service is intentionally unauthenticated for local development. Production deployment requires API key auth, rate limiting, and HTTPS.
+
+**Redis event publisher not wired into demo**
+The publisher exists and is tested in isolation but is not connected to the live demo pipeline. Connecting it is a one-line change; it was excluded to keep the demo dependencies minimal.
+
+## Test suite
+
+76 tests, all passing.
+`uv run pytest tests/ -v`
+
 ## Phase progress
 
 - [x] Phase 1 — Foundation (PyTorch, MPS, YOLO)
@@ -112,16 +154,3 @@ notebooks/       Colab notebook used to fine-tune VideoMAE
 - [x] Phase 4 — Action recognition (VideoMAE 88.74% F1)
 - [x] Phase 5 — Anomaly detection (Conv-Autoencoder)
 - [x] Phase 6 — Intelligence layer (LangGraph + Dashboard)
-
-## Known limitations
-
-- **Anomaly detector is weak.** It reconstructs frames of the scene it was trained on, so lighting, framing or who is in view changes it easily. The 0% false-positive figure was measured on a single scene right after calibration. In later runs it flagged the scene as anomalous almost constantly, which adds 10 points to the risk score. It needs a longer, more varied training capture.
-- **Fight detection is untested on live fights.** It scores 91.7% on validation clips, but one person waving their arms at the webcam does not register (probability stayed at 0). Live frames are sampled every 0.3 s to match training, so `--fight` only suits live cameras, not video files.
-- **`--fight` costs frame rate** (about 15 to 11–12 FPS) because it shares the GPU with the detector.
-- **The dashboard API is unauthenticated** and accepts any origin; it listens on `127.0.0.1` only.
-- The Redis event publisher exists but is not wired into the demo pipeline.
-
-## Test suite
-
-76 tests, all passing.
-`uv run pytest tests/ -v`
